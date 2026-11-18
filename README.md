@@ -53,51 +53,6 @@ Tera Term は [Tera Term Project](https://teratermproject.github.io/) から入�
 
 [Issues](https://github.com/yukkunn611/nwlog-teraterm/issues) へお寄せください。無償で公開しているツールのため、対応はお約束できません。報告の際は、詳細設定で「デバッグモード」を ON にして再現させ、`data\debug\run_日時` フォルダの内容を添えていただくと原因を追いやすくなります（IP アドレスやホスト名が含まれるので、必要に応じて伏せてください）。
 
-## 開発者向け
-
-### ビルド
-
-Go 1.24 以降が必要です。外部ライブラリは使っていません。
-
-```bat
-go build -trimpath -ldflags "-H=windowsgui -s -w" -o "NWログ取得マクロ（TeraTerm）.exe" .
-```
-
-Linux / macOS からのクロスビルド:
-
-```sh
-GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-H=windowsgui -s -w" -o nwlog-teraterm.exe .
-```
-
-アイコンは `rsrc_windows_amd64.syso` に埋め込み済みです。差し替える場合は [rsrc](https://github.com/akavel/rsrc) で作り直してください。
-
-### 構成
-
-| ファイル | 内容 |
-|---|---|
-| `main.go` | 起動、画面用の小さな Web サーバー（127.0.0.1 のみ） |
-| `api.go` | 画面から呼ばれる API |
-| `runner.go` | 取得ジョブの実行（並列制御・進捗監視・タイムアウト） |
-| `ttl.go` | 1 台ぶんの Tera Term マクロ（TTL）の生成 |
-| `devtype.go` | 機器種別ごとの既定値 |
-| `update.go` | 更新の確認と自動更新 |
-| `store.go` | 設定・プロファイル・コマンドセットの保存 |
-| `sys_windows.go` | Windows 固有の処理（文字コード、プロセス管理、ダイアログ、プロキシ） |
-| `web/` | 画面（HTML / CSS / JavaScript）。`changelog.json` が更新履歴の元データ |
-
-### リリース手順
-
-1. `web/changelog.json` の先頭に新しいバージョンの項目を追加し、`main.go` の `appVersion` も合わせて更新する
-2. コミットしてプッシュする
-3. `v` 付きのタグ（例: `v1.3.1`）を作ってプッシュする
-
-```sh
-git tag v1.3.1
-git push origin v1.3.1
-```
-
-GitHub Actions（`.github/workflows/release.yml`）が自動で EXE をビルドし、`changelog.json` の内容をリリースノートにして Release を作成します。アプリはこの Release を見て更新を知らせます。
-
 ## ライセンス
 
 [MIT License](LICENSE) © 2026 Yuki Kayamura
