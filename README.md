@@ -1,0 +1,2 @@
+# nwlog-teraterm
+Cisco・FortiGate・YAMAHA RTXなどのネットワーク機器のログを、Tera Term経由で複数台まとめて取得するWindowsツール。最大200台を並列で取得でき、show techなど長時間のコマンドにも対応。ホストリストはExcelから貼り付け可能。インストール不要で、自動更新に対応しています。
