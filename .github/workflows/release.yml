@@ -35,6 +35,12 @@ jobs:
           jq -e --arg v "$VER" 'any(.[]; .version == $v)' web/changelog.json > /dev/null \
             || { echo "::error::web/changelog.json に $VER の項目がありません"; exit 1; }
 
+      - name: EXEにバージョン情報・提供者名・マニフェストを埋め込む
+        # 「ファイルのプロパティ」に何も無いEXEはウイルス対策ソフトに疑われやすいため（内容は winres/winres.json）
+        run: |
+          go run github.com/tc-hib/go-winres@v0.3.3 make --in winres/winres.json --arch amd64 --out rsrc \
+            --product-version "$VER.0" --file-version "$VER.0"
+
       - name: ビルド
         run: |
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
