@@ -32,7 +32,7 @@ const (
 )
 
 // リリース時は GitHub Actions が -ldflags "-X main.appVersion=x.y.z" でタグの番号を入れる
-var appVersion = "1.3.0"
+var appVersion = "1.3.1"
 
 //go:embed web
 var webFS embed.FS

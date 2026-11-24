@@ -106,11 +106,12 @@ var hostClass = `([A-Za-z0-9_.:/@~\-]+)`
 //	Cisco      "SW01#"            → 1=SW01
 //	FortiGate  "FGT60F # "        → 1=FGT60F 3=" "   （記号の前に空白が入る）
 //	FortiGate  "FGT60F (root) # " → 1=FGT60F 2=" (root)" 3=" "（VDOM有効時）
+//	FortiGate  "FGT-1(Primary) # " → 1=FGT-1 2="(Primary)" 3=" "（HA構成。括弧の前に空白が無い）
 //	YAMAHA     "RTX1210> "        → 1=RTX1210
 func promptRegex(sym string) string {
 	// ※グループ2・3は空文字でも必ず一致する形にしておく。Tera Termは一致しなかったグループがあると
 	//   範囲外を参照する作りのため（ttmdde.c の region->beg が -1 のまま使われる）
-	return hostClass + `((?: \([^)\s]*\))?)( ?)` + regexp.QuoteMeta(sym)
+	return hostClass + `((?: ?\([^)\s]*\))*)( ?)` + regexp.QuoteMeta(sym)
 }
 
 func buildTTL(in TTLInput) string {
@@ -127,6 +128,7 @@ func buildTTL(in TTLInput) string {
 		b.WriteString("\r\n")
 	}
 	debug := in.TraceFile != ""
+	loginLogOpened := false
 	// 失敗時に理由コードを持って終了処理へ飛ぶ。そのときのresultも控えておく（調査用）
 	failIf := func(cond, code string) {
 		w("if %s then", cond)
@@ -170,6 +172,12 @@ func buildTTL(in TTLInput) string {
 		w("\terrcode = '%s'", failCode)
 		w("\tgoto finish")
 		w("endif")
+		if debug && !loginLogOpened {
+			// 調査用: ログインからプロンプト判定までのやり取りをそのまま残す（本番のログを開く前に閉じる）
+			loginLogOpened = true
+			w("logopen %s 0 0 0 0 1", ttlStr(strings.TrimSuffix(in.TraceFile, "_trace.txt")+"_login.txt"))
+			w("logging = 2")
+		}
 	}
 	mark := func(name string) {
 		w("mkname = '%s'", name)
@@ -321,6 +329,13 @@ func buildTTL(in TTLInput) string {
 	w("sendln ''")
 	w("waitregex %s %s", reEn, reUser)
 	w("hres = result")
+	w("if hres = 0 then")
+	w("\t; 1回目で拾えなければ、もう一度Enterを送って試す（ログイン直後の表示が長い機器向け）")
+	w("\tsendln ''")
+	w("\ttimeout = 5")
+	w("\twaitregex %s %s", reEn, reUser)
+	w("\thres = result")
+	w("endif")
 	w("if hres > 0 then")
 	w("\thostname = groupmatchstr1")
 	w("\tvdom = groupmatchstr2")
@@ -380,10 +395,12 @@ func buildTTL(in TTLInput) string {
 	w("")
 	trace("enable 通過")
 	w("; 以降の待ち受けは「ホスト名＋プロンプト記号」で行う（FortiGateの空白・VDOM表記もそのまま含める）")
-	w("; ホスト名が拾えなかった場合は記号だけで代用し、出力中の記号を誤検知しないよう静かになったかも確かめる")
 	w("strlen hostname")
 	w("if result = 0 then")
-	w("\tpr1 = pch")
+	w("\t; ホスト名が拾えなかった場合は、特権・ユーザどちらの記号でも終わりとみなす。")
+	w("\t; （どちらのモードか分からないので片方に決め打ちしない。出力中の記号を誤検知しないよう静かになったかも確かめる）")
+	w("\tpr1 = %s", pEn)
+	w("\tpr2 = %s", pUser)
 	w("\thostname = targetip")
 	w("\tquietchk = 1")
 	w("else")
@@ -391,11 +408,11 @@ func buildTTL(in TTLInput) string {
 	w("\tstrconcat pr1 vdom")
 	w("\tstrconcat pr1 spc")
 	w("\tstrconcat pr1 pch")
+	w("\t; conf t などで (config)# になっても止まらないようにしておく")
+	w("\tpr2 = ')'")
+	w("\tstrconcat pr2 spc")
+	w("\tstrconcat pr2 pch")
 	w("endif")
-	w("; conf t などで (config)# になっても止まらないようにしておく")
-	w("pr2 = ')'")
-	w("strconcat pr2 spc")
-	w("strconcat pr2 pch")
 	if debug {
 		w("tmsg = '待ち受けるプロンプト='")
 		w("strconcat tmsg pr1")
@@ -452,6 +469,12 @@ func buildTTL(in TTLInput) string {
 	w("\tfileclose mfh")
 	w("endif")
 	w("")
+	if debug {
+		w("if logging = 2 then")
+		w("\tlogclose")
+		w("\tlogging = 0")
+		w("endif")
+	}
 	w("logopen logpath 0 1 0 0 1")
 	failIf("result <> 0", "LOGOPEN")
 	w("logging = 1")
@@ -493,7 +516,7 @@ func buildTTL(in TTLInput) string {
 
 	// ---------------- 終了処理 ----------------
 	w(":finish")
-	w("if logging = 1 then")
+	w("if logging > 0 then")
 	w("\tlogclose")
 	w("endif")
 	w("int2str swarn nwarn")
