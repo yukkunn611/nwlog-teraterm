@@ -32,6 +32,10 @@ type TTLInput struct {
 	T        Target
 	MarkBase string // 進捗マーカーファイルの接頭辞（拡張子なしのフルパス）
 	Slot     int    // 並列時の何番目の枠か。ウィンドウ位置をずらすのに使う
+	// 並列時の順番待ち。"" なら待たずにすぐつなぐ（1台ずつ取得・プレビュー）。
+	// "link" はアプリの合図(.go)を待ってからTera Termとのリンクだけ先に済ませ、
+	// "connect" は合図を待ってから従来どおり1回のconnectで接続まで行う
+	Handshake string
 	// デバッグモード時だけ指定する。マクロがどこまで進んだかを1行ずつ書き出すファイル
 	TraceFile string
 }
@@ -73,8 +77,8 @@ func clArg(v string) string {
 	return v
 }
 
-// connect に渡すコマンドライン
-func connectLine(st Settings, proto, ip string, port int, user, pass string, slot int) string {
+// 接続先とログイン方法の部分
+func hostOpts(st Settings, proto, ip string, port int, user, pass string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s:%d", ip, port)
 	if proto == "ssh" {
@@ -85,18 +89,21 @@ func connectLine(st Settings, proto, ip string, port int, user, pass string, slo
 	} else {
 		b.WriteString(" /nossh /T=1")
 	}
+	return b.String()
+}
+
+// ウィンドウの出し方の部分（Tera Termを立ち上げるときにしか効かない）
+func windowOpts(st Settings, slot int) string {
 	switch st.WindowMode {
 	case "hidden":
-		b.WriteString(" /V")
+		return " /V"
 	case "min":
-		b.WriteString(" /I")
-	default:
-		// 通常表示のときは重ならないよう少しずつずらして並べる
-		x := 30 + (slot%6)*300
-		y := 30 + ((slot/6)%4)*210
-		fmt.Fprintf(&b, " /X=%d /Y=%d", x, y)
+		return " /I"
 	}
-	return b.String()
+	// 通常表示のときは重ならないよう少しずつずらして並べる
+	x := 30 + (slot%6)*300
+	y := 30 + ((slot/6)%4)*210
+	return fmt.Sprintf(" /X=%d /Y=%d", x, y)
 }
 
 var hostClass = `([A-Za-z0-9_.:/@~\-]+)`
@@ -145,28 +152,81 @@ func buildTTL(in TTLInput) string {
 			w("call trace")
 		}
 	}
-	// connect。Tera Termとのリンクに失敗した(result=0)ときは少し待ってやり直す
-	// 複数台を同時に立ち上げた直後はリンクを取りこぼすことがあるため
-	connect := func(line, failCode string) {
-		w("ctry = 0")
-		w(":doconnect")
-		trace("connect 発行")
-		w("connect %s", ttlStr(line))
-		w("cres = result")
+	// 進捗マーカー（.s1 など）を作るサブルーチン呼び出し
+	mark := func(name string) {
+		w("mkname = '%s'", name)
+		w("call mark")
+	}
+	// connect の結果をトレースに残す
+	traceRes := func(what string) {
 		if debug {
 			w("int2str scres cres")
-			w("tmsg = 'connect 戻り result='")
+			w("tmsg = '%s 戻り result='", what)
 			w("strconcat tmsg scres")
 			w("strconcat tmsg ' (0=リンク失敗 1=リンクのみ 2=接続完了)'")
 			w("call trace")
 		}
-		w("if cres = 0 then")
-		w("\tctry = ctry + 1")
-		w("\tif ctry < 3 then")
-		w("\t\tmpause 2000")
-		w("\t\tgoto doconnect")
-		w("\tendif")
-		w("endif")
+	}
+	// connect。Tera Termとのリンクに失敗した(result=0)ときは少し待ってやり直す
+	//
+	// 並列のときは、Tera Termを何台も同時にリンクさせるとDDEの呼びかけ同士が詰まって
+	// マクロが connect から戻ってこなくなる。そこでアプリから合図(.go)が来るまで待ち、
+	// 自分の番が来てからリンクする。リンクだけ済めば(.lk)次の1台に順番を譲り、
+	// 機器への接続とログインは他の台と同時に進める。
+	connect := func(host, win, failCode string) {
+		if in.Handshake != "" {
+			w("; --- 順番待ち（アプリが合図ファイルを置くまで待つ） ---")
+			w("gofile = mkbase")
+			w("strconcat gofile '.go'")
+			w(":waitgo")
+			w("filesearch gofile")
+			w("if result = 0 then")
+			w("\tmpause 100")
+			w("\tgoto waitgo")
+			w("endif")
+			trace("順番が来た")
+		}
+		w("ctry = 0")
+		if in.Handshake == "link" {
+			// 1回目: 接続先を渡さずにTera Termを立ち上げてリンクだけ張る（/DS で接続ダイアログも出さない）
+			w(":dolink")
+			trace("connect 発行（リンクのみ）")
+			w("connect %s", ttlStr("/DS"+win))
+			w("cres = result")
+			traceRes("リンク")
+			w("if cres = 0 then")
+			w("\tctry = ctry + 1")
+			w("\tif ctry < 3 then")
+			w("\t\tmpause 2000")
+			w("\t\tgoto dolink")
+			w("\tendif")
+			w("endif")
+			// 2が返るのはTERATERM.INIの自動接続で別の所につながったとき。そのまま進むと別の機器に入ってしまう
+			w("if cres <> 1 then")
+			w("\tdres = cres")
+			w("\terrcode = 'LINK'")
+			w("\tgoto finish")
+			w("endif")
+			mark(".lk")
+			// 2回目: リンク済みのTera Termに接続先を渡す（ウィンドウの指定はもう効かないので付けない）
+			trace("connect 発行（接続）")
+			w("connect %s", ttlStr(host))
+			w("cres = result")
+			traceRes("接続")
+		} else {
+			w(":doconnect")
+			trace("connect 発行")
+			w("connect %s", ttlStr(host+win))
+			w("cres = result")
+			traceRes("connect")
+			w("if cres = 0 then")
+			w("\tctry = ctry + 1")
+			w("\tif ctry < 3 then")
+			w("\t\tmpause 2000")
+			w("\t\tgoto doconnect")
+			w("\tendif")
+			w("endif")
+		}
 		w("if cres <> 2 then")
 		w("\tdres = cres")
 		w("\terrcode = '%s'", failCode)
@@ -179,11 +239,6 @@ func buildTTL(in TTLInput) string {
 			w("logging = 2")
 		}
 	}
-	mark := func(name string) {
-		w("mkname = '%s'", name)
-		w("call mark")
-	}
-
 	dt := t.DT
 	pU := ttlStr(dt.PromptUsername)
 	pP := ttlStr(dt.PromptPassword)
@@ -232,7 +287,7 @@ func buildTTL(in TTLInput) string {
 	// ---------------- 接続 ----------------
 	if !relay {
 		w("; --- 対象機器へ直接つなぐ ---")
-		connect(connectLine(st, t.Host.Proto, t.Host.IP, t.Port, t.User, t.Pass, in.Slot), "CONNECT")
+		connect(hostOpts(st, t.Host.Proto, t.Host.IP, t.Port, t.User, t.Pass), windowOpts(st, in.Slot), "CONNECT")
 		mark(".s2")
 		w("timeout = %d", t.LoginTimeout)
 		if t.Host.Proto == "ssh" {
@@ -263,7 +318,7 @@ func buildTTL(in TTLInput) string {
 		jpAll := strings.Join(jpl, " ")
 
 		w("; --- まず踏み台へログインする ---")
-		connect(connectLine(st, j.Proto, j.IP, jport, j.User, j.Pass, in.Slot), "JUMP_CONNECT")
+		connect(hostOpts(st, j.Proto, j.IP, jport, j.User, j.Pass), windowOpts(st, in.Slot), "JUMP_CONNECT")
 		mark(".s2")
 		w("timeout = %d", t.LoginTimeout+5)
 		if j.Proto == "ssh" {
@@ -670,6 +725,8 @@ func errMessage(code string) string {
 	switch code {
 	case "CONNECT":
 		return "接続できませんでした"
+	case "LINK":
+		return "Tera Termとのリンクができませんでした（TERATERM.INIで起動時に自動接続する設定になっている場合は、設定の「並列時の起動方法」を「接続完了まで待つ」にしてください）"
 	case "LOGIN_PROMPT":
 		return "ログインプロンプトが出ませんでした"
 	case "LOGIN_TIMEOUT":

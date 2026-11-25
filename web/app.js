@@ -694,7 +694,7 @@ function openSettings(msg) {
       <div class="fld"><span>バージョン</span><span>${radio('ttVersion', '5', '5系')}${radio('ttVersion', '4', '4系')}<span class="unit">場所を指定すると自動で判定します。合わない場合は手で切り替えてください</span></span></div>
       <div class="fld"><span>ウィンドウ表示</span><span>${radio('windowMode', 'min', '最小化（おすすめ）')}${radio('windowMode', 'normal', '通常表示（動作確認用・遅い）')}${radio('windowMode', 'hidden', '非表示')}</span></div>
       <div class="fld"><span></span><span class="unit">通常表示は画面の描画に時間を取られ、並列取得では最小化・非表示の4〜5倍の時間がかかります（実測）。止まる場所を目で確認したいとき専用です。</span></div>
-      <label class="fld"><span>起動の間隔</span>${num('launchIntervalMs', 'ミリ秒（並列時、1台ずつこの間隔をあけて起動）', 0, 10000)}</label>
+      <label class="fld"><span>リンクの間隔</span>${num('launchIntervalMs', 'ミリ秒（並列時、1台のリンクが済んでから次の1台までにあける時間）', 0, 10000)}</label>
     </div>
     <div class="sgroup">
       <h3>タイムアウト</h3>
@@ -711,8 +711,8 @@ function openSettings(msg) {
       <label class="fld"><span>Telnetの既定ポート</span>${num('telnetPort', '', 1, 65535)}</label>
       ${chk('noSecurityWarning', 'SSH初回接続の確認ダイアログを出さない')}
       <p class="note">known_hosts 未登録の機器で確認ダイアログが出ると並列取得が止まるため、既定でONです。ホスト鍵の確認が省かれるので、信頼できる社内ネットワークでのみ使ってください。</p>
-      ${chk('serialStartup', '並列取得のとき、1台ずつ接続完了を待ってから次を起動する（安定優先）')}
-      <p class="note">Tera Termを同時に立ち上げると接続に失敗することがあるための対策です。ログの取得自体は並列で進みます。OFFにすると起動間隔だけあけて一斉に起動します（速いが不安定になることがあります）。</p>
+      <div class="fld"><span>並列時の起動方法</span><span>${radio('startupWait', 'link', 'リンクだけ1台ずつ（おすすめ・速い）')}${radio('startupWait', 'connect', '接続完了まで待つ（従来）')}</span></div>
+      <p class="note">Tera Termは複数台を同時にマクロとつなぐ（リンクする）と固まってしまうため、その瞬間だけ1台ずつ順番に通します。「リンクだけ1台ずつ」は順番待ちが1台1秒ほどで済み、機器への接続とログインは同時に進みます。うまくいかない環境では「接続完了まで待つ」にすると、機器に接続し終わるまで次の1台を待たせます（確実だが遅い）。</p>
       ${chk('precheck', '開始前に疎通チェックを行い、届かない機器は飛ばす')}
       <label class="fld"><span>疎通チェックの待ち</span>${num('precheckTimeoutMs', 'ミリ秒', 200, 30000)}</label>
     </div>

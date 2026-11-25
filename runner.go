@@ -283,7 +283,7 @@ func (r *Runner) Start(st Settings, p Profile, ids []string, sets map[string]str
 				dbg.logf("%s v%s  (%s/%s)", appName, appVersion, runtime.GOOS, runtime.GOARCH)
 				dbg.logf("ttpmacro: %s  [%s]  マクロ文字コード=%s系向け", st.TtpmacroPath, ttDetail, st.TTVersion)
 				dbg.logf("設定: %s", sj)
-				dbg.logf("取得方式: mode=%s 同時接続数=%d 実際の並列数=%d 順次起動=%v 踏み台=%v 対象=%d台", p.Mode, p.Concurrency, parallel, st.SerialStartup, p.Jump.Enabled, len(items))
+				dbg.logf("取得方式: mode=%s 同時接続数=%d 実際の並列数=%d 順番を譲るタイミング=%s 踏み台=%v 対象=%d台", p.Mode, p.Concurrency, parallel, st.StartupWait, p.Jump.Enabled, len(items))
 				dbg.logf("ログ保存先: %s / 作業フォルダ: %s", p.LogDir, runDir)
 				for i, it := range items {
 					e := ""
@@ -438,6 +438,12 @@ func (r *Runner) runOne(st Settings, p Profile, hs *HostState, t Target, runDir 
 	base := filepath.Join(runDir, fmt.Sprintf("h%d", idx))
 	ttlPath := base + ".ttl"
 	in := TTLInput{St: st, Jump: p.Jump, Ident: p.Ident, LogDir: p.LogDir, T: t, MarkBase: base, Slot: slot}
+	// 並列のときだけ順番待ちを入れる。1台ずつのときは同時にリンクすることがないので不要
+	handshake := ""
+	if parallel > 1 {
+		handshake = st.StartupWait
+	}
+	in.Handshake = handshake
 	if dbg != nil {
 		stem := filepath.Join(dbg.dir, fmt.Sprintf("h%d_%s", idx, safeName(t.Host.IP)))
 		in.TraceFile = stem + "_trace.txt"
@@ -464,26 +470,27 @@ func (r *Runner) runOne(st Settings, p Profile, hs *HostState, t Target, runDir 
 		}
 	}()
 
-	// Tera Termを一斉に立ち上げると、マクロとTera Termのリンク(DDE)を取りこぼして接続に失敗することがある。
-	// そこで起動は1台ずつ順番に行う。「順次起動」がONなら、接続が済むまで次の1台を待たせる
-	// （ログの取得そのものは並列で進む）。OFFなら起動間隔だけあけて次へ進む。
-	serialStart := st.SerialStartup && parallel > 1
-	if parallel > 1 {
-		r.update(hs, func(h *HostState) { h.Status = "running"; h.Stage = "起動の順番待ち" })
-	}
-	tq := time.Now()
-	gate.wait(idx)
+	// Tera Termを何台も同時にマクロとリンク(DDE)させると、呼びかけ同士が詰まって
+	// connect から戻ってこなくなる。そこで ttpmacro.exe 自体は全部すぐに起動しておき、
+	// リンクの瞬間だけリストの上から1台ずつ通す。マクロは合図ファイル(.go)を待ってからリンクし、
+	// リンクが済んだら(.lk)、または接続まで済んだら(.s2)次の1台に合図を出す。
+	// 機器への接続・ログイン・ログ取得は他の台と同時に進む。
 	released := false
 	launched := false
 	release := func() {
-		if !released {
-			released = true
-			// 実際に起動したときだけ間隔をあける（中断時に待ち行列がすぐ捌けるように）
-			if launched && st.LaunchIntervalMs > 0 {
-				time.Sleep(time.Duration(st.LaunchIntervalMs) * time.Millisecond)
-			}
-			gate.pass(idx)
+		if handshake == "" || released {
+			return
 		}
+		released = true
+		wait := 0
+		// 実際に起動したときだけ間隔をあける（中断時に待ち行列がすぐ捌けるように）
+		if launched {
+			wait = st.LaunchIntervalMs
+		}
+		go func() {
+			time.Sleep(time.Duration(wait) * time.Millisecond)
+			gate.pass(idx)
+		}()
 	}
 	defer release()
 	select {
@@ -496,6 +503,7 @@ func (r *Runner) runOne(st Settings, p Profile, hs *HostState, t Target, runDir 
 	if st.WindowMode == "hidden" {
 		args = []string{"/V", ttlPath}
 	}
+	tq := time.Now()
 	cmd := exec.Command(st.TtpmacroPath, args...)
 	cmd.Dir = filepath.Dir(st.TtpmacroPath)
 	if err := cmd.Start(); err != nil {
@@ -513,19 +521,31 @@ func (r *Runner) runOne(st Settings, p Profile, hs *HostState, t Target, runDir 
 		r.mu.Unlock()
 		ph.close()
 	}()
-	dbg.logf("%s 起動 pid=%d 枠=%d 順番待ち=%dms ジョブ登録=%v  %s %s", tag, cmd.Process.Pid, slot, time.Since(tq).Milliseconds(), ph.inJob(), st.TtpmacroPath, strings.Join(args, " "))
-	if !serialStart {
-		release()
+	dbg.logf("%s 起動 pid=%d 枠=%d 起動にかかった時間=%dms ジョブ登録=%v 順番待ち=%q  %s %s", tag, cmd.Process.Pid, slot, time.Since(tq).Milliseconds(), ph.inJob(), handshake, st.TtpmacroPath, strings.Join(args, " "))
+
+	// 自分の番が来たら知らせてもらう（ゲートの中で待つと中断や異常終了に気付けないので別に待つ）
+	myTurn := make(chan struct{})
+	if handshake != "" {
+		r.update(hs, func(h *HostState) { h.Status = "running"; h.Stage = "接続の順番待ち" })
+		go func() { gate.wait(idx); close(myTurn) }()
+	} else {
+		close(myTurn)
 	}
+	gotTurn := false
+	var turnAt time.Time
 	// 前面にないウィンドウでも速度を落とされないようにしておく（Tera Term本体は接続後にもう一度かける）
 	unthrottleTree(cmd.Process.Pid)
 
-	r.update(hs, func(h *HostState) { h.Status = "running"; h.Stage = "Tera Term起動中" })
+	if handshake == "" {
+		r.update(hs, func(h *HostState) { h.Status = "running"; h.Stage = "Tera Term起動中" })
+	}
 
 	exited := make(chan struct{})
 	go func() { cmd.Wait(); close(exited) }()
 
 	started := time.Now()
+	turnAt = started
+	linked := false
 	connected := false
 	gotHost := false
 	sawLogin := false
@@ -565,15 +585,32 @@ loop:
 		case <-abortCh:
 			kill("abort", "")
 			break loop
+		case <-myTurn:
+			myTurn = nil
+			gotTurn = true
+			turnAt = time.Now()
+			if handshake != "" {
+				if err := os.WriteFile(base+".go", nil, 0o644); err != nil {
+					dbg.logf("%s 合図ファイルを作れません: %v", tag, err)
+				}
+				dbg.logf("%s 順番が来たので合図(.go) 起動から%dms", tag, time.Since(started).Milliseconds())
+				r.update(hs, func(h *HostState) { h.Stage = "Tera Term起動中" })
+			}
 		case <-tick.C:
 			// マーカーを見て進捗を更新
+			if gotTurn && !linked && handshake == "link" && exists(base+".lk") {
+				linked = true
+				dbg.logf("%s リンク完了(.lk) 合図から%dms", tag, time.Since(turnAt).Milliseconds())
+				r.update(hs, func(h *HostState) { h.Stage = "接続中" })
+				release() // 次の1台にリンクの順番を譲る
+			}
 			if !connected && exists(base+".s2") {
 				connected = true
-				dbg.logf("%s 接続完了(.s2) 起動から%dms", tag, time.Since(started).Milliseconds())
+				dbg.logf("%s 接続完了(.s2) 起動から%dms 合図から%dms", tag, time.Since(started).Milliseconds(), time.Since(turnAt).Milliseconds())
 				r.update(hs, func(h *HostState) { h.Stage = "ログイン中" })
 				n := unthrottleTree(cmd.Process.Pid)
 				dbg.logf("%s 省電力による速度抑制を解除したプロセス数=%d", tag, n)
-				release() // 次の1台の起動を許可する
+				release() // 「接続完了まで待つ」のときはここで次へ
 			}
 			if connected && !gotHost && exists(base+".s4") {
 				gotHost = true
@@ -613,7 +650,11 @@ loop:
 				}
 				lastSpeed = time.Now()
 			}
-			el := time.Since(started)
+			// 時間は自分の番が来てから数える（順番待ちの間は数えない）
+			if !gotTurn {
+				break
+			}
+			el := time.Since(turnAt)
 			if !connected && el > time.Duration(st.ConnectTimeout)*time.Second {
 				kill("connect", "接続待ちタイムアウト")
 				break loop
@@ -655,7 +696,11 @@ loop:
 			return
 		case "connect":
 			h.Status, h.Stage = "error", "接続失敗"
-			h.Message = fmt.Sprintf("%d秒以内に接続できませんでした（機器の応答なし、またはTera Termが確認ダイアログで止まっています）", st.ConnectTimeout) + diagNote
+			if handshake == "link" && !linked {
+				h.Message = fmt.Sprintf("%d秒以内にTera Termとのリンクが終わりませんでした（Tera Termが起動直後に止まっています。続く場合は設定の「並列時の起動方法」を「接続完了まで待つ」にしてください）", st.ConnectTimeout) + diagNote
+			} else {
+				h.Message = fmt.Sprintf("%d秒以内に接続できませんでした（機器の応答なし、またはTera Termが確認ダイアログで止まっています）", st.ConnectTimeout) + diagNote
+			}
 			return
 		case "total":
 			h.Status, h.Stage = "error", "タイムアウト"

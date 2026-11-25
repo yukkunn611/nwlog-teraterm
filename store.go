@@ -54,8 +54,10 @@ type Settings struct {
 
 	LastProfile string `json:"lastProfile"`
 
-	// 並列時、前の1台が接続し終わるまで次のTera Termを起動しない（同時起動での取りこぼし対策）
-	SerialStartup bool `json:"serialStartup"`
+	// 並列時、次の1台に順番を譲るタイミング。Tera Termを同時にリンクさせると固まるため1台ずつ通す
+	//   "link"    … Tera Termとのリンクが済んだら次へ（速い。既定）
+	//   "connect" … 機器への接続まで済んだら次へ（v1.3.1までの「1台ずつ接続完了を待つ」と同じ）
+	StartupWait string `json:"startupWait"`
 	// 調査用のログを data\debug に残す
 	Debug bool `json:"debug"`
 	// 設定ファイルの世代。既定値を変えたときの引き継ぎ判定に使う
@@ -75,8 +77,8 @@ func defaultSettings() Settings {
 		WindowMode:         "min",
 		LaunchIntervalMs:   500,
 		ConnectTimeout:     30,
-		SerialStartup:      true,
-		Schema:             5,
+		StartupWait:        "link",
+		Schema:             6,
 		UpdateCheck:        true,
 		DevTypes:           builtinDevTypes(),
 		LoginTimeout:       10,
@@ -263,7 +265,6 @@ func (s *Store) loadSettings() Settings {
 			if st.ConnectTimeout == 20 {
 				st.ConnectTimeout = 30
 			}
-			st.SerialStartup = true
 			st.Schema = 2
 		}
 		if st.Schema < 3 {
@@ -314,6 +315,12 @@ func (s *Store) loadSettings() Settings {
 			st.UpdateCheck = true
 			st.Schema = 5
 		}
+		if st.Schema < 6 {
+			// v1.3.2: 「1台ずつ接続完了を待つ」のON/OFFをやめ、リンクだけ1台ずつ行う方式を既定にした
+			// （OFFだと同時リンクで固まり、ONだと遅かったため）
+			st.StartupWait = "link"
+			st.Schema = 6
+		}
 	}
 	// 引き継いだら旧項目は捨てる
 	st.PromptUsername, st.PromptPassword, st.PromptUser, st.PromptEnable = "", "", "", ""
@@ -329,6 +336,9 @@ func normalizeSettings(st *Settings) {
 	}
 	if st.WindowMode != "normal" && st.WindowMode != "min" && st.WindowMode != "hidden" {
 		st.WindowMode = d.WindowMode
+	}
+	if st.StartupWait != "link" && st.StartupWait != "connect" {
+		st.StartupWait = d.StartupWait
 	}
 	clamp := func(v *int, lo, hi, def int) {
 		if *v < lo || *v > hi {
